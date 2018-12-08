@@ -34,9 +34,11 @@ private:
 	// Input and mesh swapping
 	bool prevTab;
 	unsigned int currentEntity;
+	bool prevB;
+	unsigned int currentEnv;
 
 	// Keep track of "stuff" to clean up
-	Model* models[7];
+	Model* models[8];
 	std::vector<GameEntity*> entities;
 	Camera* camera;
 
@@ -46,6 +48,7 @@ private:
 	void LoadModels();
 	void LoadTextures();
 	void CreateGameEntities();
+	void CreateBRDFLUT();
 	void ConvertEquisToEnvironments(int hdrInd);
 
 	// Buffers to hold actual geometry data
@@ -59,6 +62,7 @@ private:
 	SimplePixelShader* equirectangularToCubemapPS;
 	SimplePixelShader* irradianceConvolutionPS;
 	SimplePixelShader* prefilterEnvironmentPS;
+	SimplePixelShader* integrateBRDFPS;
 
 	// The matrices to go from model space to screen space
 	DirectX::XMFLOAT4X4 worldMatrix;
@@ -78,11 +82,13 @@ private:
 	ID3D11ShaderResourceView* metalnessMapSRVs[11];
 	ID3D11ShaderResourceView* roughnessMapSRVs[11];
 	ID3D11ShaderResourceView* aoMapSRVs[2];
-	//ID3D11Texture2D* hdrEquiTextures[1];
-	ID3D11ShaderResourceView* hdrEquiSRVs[1];
-	ID3D11ShaderResourceView* hdrCubeSRVs[1];
-	ID3D11ShaderResourceView* irradianceMapSRVs[1];
-	ID3D11ShaderResourceView* envPrefilterSRVs[1];
+
+	ID3D11ShaderResourceView* hdrEquiSRVs[3];
+	//ID3D11ShaderResourceView* hdrIrrEquiSRVs[3];
+	ID3D11ShaderResourceView* hdrCubeSRVs[3];
+	ID3D11ShaderResourceView* irradianceMapSRVs[3];
+	ID3D11ShaderResourceView* envPrefilterSRVs[3];
+	ID3D11ShaderResourceView* brdfLUTSRV;
 
 
 	// Needed for sampling options (like filter and address modes)

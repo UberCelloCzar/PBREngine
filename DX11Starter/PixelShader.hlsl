@@ -1,5 +1,3 @@
-#include <IBLFunctions.hlsli>
-
 cbuffer externalData : register(b0)
 {
 	float3 LightPos1;
@@ -25,14 +23,28 @@ Texture2D NormalMap			 : register(t1);
 Texture2D MetallicMap        : register(t2);
 Texture2D RoughnessMap       : register(t3);
 Texture2D AOMap              : register(t4);
-//Texture2D BRDFLookup		 : register(t5);
-//TextureCube EnvIrradianceMap : register(t6);
-//TextureCube EnvPrefilterMap	 : register(t7);
+Texture2D BRDFLookup		 : register(t5);
+TextureCube EnvIrradianceMap : register(t6);
+TextureCube EnvPrefilterMap	 : register(t7);
 
 SamplerState BasicSampler	: register(s0);
 
+static const float PI = 3.14159265359;
+static const float MAX_REF_LOD = 4.0f;
 
-float GeometrySchlickGGX(float NdotV, float roughness)  // k is a remapping of roughness based on direct lighting or IBL lighting
+float NormalDistributionGGXTR(float3 normal, float3 halfway, float roughness)
+{
+	float a = roughness * roughness;
+	float a2 = a * a;
+	float NdotH = max(dot(normal, halfway), 0.0);
+	NdotH = NdotH * NdotH;
+
+	float denom = (NdotH * (a2 - 1.0f) + 1.0f);
+
+	return a2 / (PI * denom * denom);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness)
 {
 	float r = roughness + 1.0f;
 	float k = (r * r) / 8.0f;
@@ -123,21 +135,16 @@ float4 main(VertexToPixel input) : SV_TARGET
 	CalculateRadiance(input, view, input.normal, albedo, roughness, metalness, LightPos4, LightColor1, F0, radiance);
 	Lo += radiance;
 
-	float3 kS = FresnelSchlickRoughness(max(dot(input.normal, view), 0.f), F0, roughness);
+	float3 kS = FresnelSchlickRoughness(max(dot(input.normal, view), 0.f), F0, roughness)*.8f;
 	float3 kD = float3(1.0f, 1.0f, 1.0f) - kS;
 	kD *= 1.0 - metalness;
-	//float3 irradiance = EnvIrradianceMap.Sample(BasicSampler, input.normal).rgb;
-	//float3 diffuse = albedo * irradiance;
+	float3 diffuse = albedo * EnvIrradianceMap.Sample(BasicSampler, input.normal).rgb;
 
+	float3 prefilteredColor = EnvPrefilterMap.SampleLevel(BasicSampler, reflection, roughness * MAX_REF_LOD).rgb;
+	float2 brdf = BRDFLookup.Sample(BasicSampler, float2(max(dot(input.normal, view), 0.0f), roughness)).rg;
+	float3 specular = prefilteredColor * (kS * brdf.x + brdf.y);
 
-	//const float MAX_REF_LOD = 4.0f;
-	//float3 prefilteredColor = skyPrefilter.SampleLevel(basicSampler, R, roughness * MAX_REF_LOD).rgb;
-	//float2 brdf = brdfLUT.Sample(basicSampler, float2(max(dot(input.normal, view), 0.0f), roughness)).rg;
-	//float3 specular = prefilteredColor * (kS * brdf.x + brdf.y);
-
-	//float3 ambient = (kD * diffuse) * ao;
-	//float3 color = ambient + Lo;
-	float3 color = Lo + float3(.2f, .2f, .2f);
+	float3 color = ((kD * diffuse + specular) * ao) + Lo; // Ambient + Lo
 	color = color / (color + float3(1.0f, 1.0f, 1.0f));
 	color = pow(color, float3(1.0f / 2.2f, 1.0f / 2.2f, 1.0f / 2.2f));
 

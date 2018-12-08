@@ -21,7 +21,7 @@ float4 main(VertexToPixel input) : SV_TARGET
 	float3 right = cross(up, normal);
 	up = cross(normal, right);
 
-	float sampleDelta = 0.020f;
+	float sampleDelta = 0.025f;
 	float nrSamples = 0.0f;
 	for (float phi = 0.0f; phi < TWOPI; phi += sampleDelta)
 	{
@@ -30,7 +30,7 @@ float4 main(VertexToPixel input) : SV_TARGET
 			float3 tangentSample = float3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
 			float3 sampleVec = (tangentSample.x * right) + (tangentSample.y * up) + (tangentSample.z * normal);
 
-			irradiance += EnvironmentCubemap.Sample(BasicSampler, sampleVec).rgb * cos(theta) * sin(theta);
+			irradiance += EnvironmentCubemap.SampleLevel(BasicSampler, sampleVec, 0).rgb * cos(theta) * sin(theta);
 			nrSamples++;
 		}
 	}

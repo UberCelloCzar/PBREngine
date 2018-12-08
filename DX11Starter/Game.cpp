@@ -21,8 +21,8 @@ Game::Game(HINSTANCE hInstance)
 	: DXCore(
 		hInstance,		   // The application's handle
 		"DirectX Game",	   // Text for the window's title bar
-		1280,			   // Width of the window's client area
-		720,			   // Height of the window's client area
+		1920,			   // Width of the window's client area
+		1080,			   // Height of the window's client area
 		true)			   // Show extra stats (fps) in title bar?
 {
 	// Initialize fields
@@ -44,8 +44,8 @@ Game::~Game()
 {
 	// Release any (and all!) DirectX objects
 	// we've made in the Game class
-	if (vertexBuffer) { vertexBuffer->Release(); }
-	if (indexBuffer) { indexBuffer->Release(); }
+	if (vertexBuffer) { vertexBuffer = 0; }
+	if (indexBuffer) { indexBuffer = 0; }
 
 	// Clean up other resources
 	for (int i = 0; i < 11; i++)
@@ -57,6 +57,7 @@ Game::~Game()
 	}
 	for (auto& ao : aoMapSRVs) ao->Release();
 	sampler->Release();
+	brdfLUTSRV->Release();
 
 	// Clean up sky stuff
 	delete skyVS;
@@ -64,10 +65,14 @@ Game::~Game()
 	skyRasterState->Release();
 	skyDepthState->Release();
 
-	hdrEquiSRVs[0]->Release();
-	hdrCubeSRVs[0]->Release();
-	irradianceMapSRVs[0]->Release();
-	//envPrefilterSRVs[0]->Release();
+	for (int i = 0; i < 3; ++i)
+	{
+		hdrEquiSRVs[i]->Release();
+		hdrCubeSRVs[i]->Release();
+		irradianceMapSRVs[i]->Release();
+		envPrefilterSRVs[i]->Release();
+	}
+	//hdrIrrEquiSRVs[1]->Release();
 
 	// Delete our simple shader objects, which
 	// will clean up their own internal DirectX stuff
@@ -77,11 +82,13 @@ Game::~Game()
 	delete equirectangularToCubemapPS;
 	delete irradianceConvolutionPS;
 	delete prefilterEnvironmentPS;
+	delete integrateBRDFPS;
 
 	// Clean up our other resources
 	for (auto& m : models) { delete m; }
 	for (auto& e : entities) { delete e; }
 	delete camera;
+	
 }
 
 void Game::Init()
@@ -127,7 +134,14 @@ void Game::Init()
 
 	// Convert equirectangular maps to all the necessary parts for a PBR environment 
 	ConvertEquisToEnvironments(0);
+	context->Flush();
+	ConvertEquisToEnvironments(1);
+	context->Flush();
+	ConvertEquisToEnvironments(2);
+	context->Flush();
+	currentEnv = 0;
 
+	CreateBRDFLUT();
 
 	context->OMSetRenderTargets(1, &backBufferRTV, depthStencilView);
 	context->RSSetViewports(1, &viewport);
@@ -153,6 +167,9 @@ void Game::LoadShaders()
 	prefilterEnvironmentPS = new SimplePixelShader(device, context);
 	prefilterEnvironmentPS->LoadShaderFile(L"PrefilterEnvPS.cso");
 
+	integrateBRDFPS = new SimplePixelShader(device, context);
+	integrateBRDFPS->LoadShaderFile(L"IntegrateBRDFPS.cso");
+
 	skyVS = new SimpleVertexShader(device, context);
 	skyVS->LoadShaderFile(L"SkyVS.cso");
 
@@ -169,12 +186,13 @@ void Game::CreateMatrices()
 void Game::LoadModels()
 {
 	models[0] = new Model("Models/cube.obj", device);
-	models[1] = new Model("Models/sphere.obj", device);
-	models[2] = new Model("Models/helix.obj", device);
-	models[3] = new Model("Models/cone.obj", device);
-	models[4] = new Model("Models/cylinder.obj", device);
-	models[5] = new Model("Models/torus.obj", device);
-	models[6] = new Model("Models/Cerberus_LP.FBX", device);
+	models[1] = new Model("Models/quad.obj", device);
+	models[2] = new Model("Models/sphere.obj", device);
+	models[3] = new Model("Models/helix.obj", device);
+	models[4] = new Model("Models/cone.obj", device);
+	models[5] = new Model("Models/cylinder.obj", device);
+	models[6] = new Model("Models/torus.obj", device);
+	models[7] = new Model("Models/Cerberus_Model.FBX", device);
 }
 
 void Game::LoadTextures()
@@ -184,10 +202,10 @@ void Game::LoadTextures()
 	CreateWICTextureFromFile(device, context, L"Textures/AluminiumInsulator_Metallic.png", 0, &metalnessMapSRVs[0]);
 	CreateWICTextureFromFile(device, context, L"Textures/AluminiumInsulator_Roughness.png", 0, &roughnessMapSRVs[0]);
 
-	CreateWICTextureFromFile(device, context, L"Textures/Gold_Albedo.png", 0, &albedoMapSRVs[1]);
-	CreateWICTextureFromFile(device, context, L"Textures/Gold_Normal.png", 0, &normalMapSRVs[1]);
-	CreateWICTextureFromFile(device, context, L"Textures/Gold_Metallic.png", 0, &metalnessMapSRVs[1]);
-	CreateWICTextureFromFile(device, context, L"Textures/Gold_Roughness.png", 0, &roughnessMapSRVs[1]);
+	CreateWICTextureFromFile(device, context, L"Textures/solidgoldbase.png", 0, &albedoMapSRVs[1]);
+	CreateWICTextureFromFile(device, context, L"Textures/solidgoldnormal.png", 0, &normalMapSRVs[1]);
+	CreateWICTextureFromFile(device, context, L"Textures/solidgoldmetal.png", 0, &metalnessMapSRVs[1]);
+	CreateWICTextureFromFile(device, context, L"Textures/solidgoldroughness.png", 0, &roughnessMapSRVs[1]);
 
 	CreateWICTextureFromFile(device, context, L"Textures/GunMetal_Albedo.png", 0, &albedoMapSRVs[2]);
 	CreateWICTextureFromFile(device, context, L"Textures/GunMetal_Normal.png", 0, &normalMapSRVs[2]);
@@ -231,10 +249,24 @@ void Game::LoadTextures()
 
 	CreateWICTextureFromFile(device, context, L"Textures/Gold_Metallic.png", 0, &aoMapSRVs[0]);
 
+	//CreateWICTextureFromFile(device, context, L"Textures/ibl_brdf_lut.png", 0, &brdfLUTSRV);
+
 	/* Load skybox and irradiance maps */
 	ScratchImage hdrScratch;
-	LoadFromHDRFile(L"Textures/Winter_Forest/WinterForest_Ref.hdr", nullptr, hdrScratch);
+	LoadFromHDRFile(L"Textures/Winter_Forest/test8_Ref.hdr", nullptr, hdrScratch);
 	if (hdrScratch.GetPixelsSize() > 0) CreateShaderResourceView(device, hdrScratch.GetImages(), hdrScratch.GetImageCount(), hdrScratch.GetMetadata(), &hdrEquiSRVs[0]);
+/*
+	LoadFromHDRFile(L"Textures/Winter_Forest/WinterForest_Env.hdr", nullptr, hdrScratch);
+	if (hdrScratch.GetPixelsSize() > 0) CreateShaderResourceView(device, hdrScratch.GetImages(), hdrScratch.GetImageCount(), hdrScratch.GetMetadata(), &hdrIrrEquiSRVs[0]);*/
+
+	LoadFromHDRFile(L"Textures/Desert_Highway/Road_to_MonumentValley_Ref.hdr", nullptr, hdrScratch);
+	if (hdrScratch.GetPixelsSize() > 0) CreateShaderResourceView(device, hdrScratch.GetImages(), hdrScratch.GetImageCount(), hdrScratch.GetMetadata(), &hdrEquiSRVs[1]);
+/*
+	LoadFromHDRFile(L"Textures/Desert_Highway/Road_toMonumentValley_Env.hdr", nullptr, hdrScratch);
+	if (hdrScratch.GetPixelsSize() > 0) CreateShaderResourceView(device, hdrScratch.GetImages(), hdrScratch.GetImageCount(), hdrScratch.GetMetadata(), &hdrIrrEquiSRVs[1]);*/
+
+	LoadFromHDRFile(L"Textures/Milkyway/Milkyway_small.hdr", nullptr, hdrScratch);
+	if (hdrScratch.GetPixelsSize() > 0) CreateShaderResourceView(device, hdrScratch.GetImages(), hdrScratch.GetImageCount(), hdrScratch.GetMetadata(), &hdrEquiSRVs[2]);
 
 	LoadFromTGAFile(L"Textures/Cerberus/Cerberus_A.tga", nullptr, hdrScratch);
 	if (hdrScratch.GetPixelsSize() > 0) CreateShaderResourceView(device, hdrScratch.GetImages(), hdrScratch.GetImageCount(), hdrScratch.GetMetadata(), &albedoMapSRVs[10]);
@@ -255,22 +287,25 @@ void Game::LoadTextures()
 void Game::CreateGameEntities()
 {
 	// Make some entities
-	GameEntity* cube = new GameEntity(0, 0, 0);
-	GameEntity* sphere = new GameEntity(1, 1, 0);
-	GameEntity* helix = new GameEntity(2, 3, 0);
-	GameEntity* cerberus = new GameEntity(6, 0, 0);
+	GameEntity* cube = new GameEntity(0, 9, 0);
+	GameEntity* quad = new GameEntity(1, 0, 0);
+	GameEntity* sphere = new GameEntity(2, 1, 0);
+	GameEntity* helix = new GameEntity(3, 3, 0);
+	GameEntity* cerberus = new GameEntity(7, 10, 1);
 	entities.push_back(cube);
+	entities.push_back(quad);
 	entities.push_back(cerberus);
 	entities.push_back(sphere);
 	entities.push_back(helix);
 
 
 	sphere->SetScale(1.5f, 1.5f, 1.5f);
+	sphere->SetPosition(0.f, 1.5f, -16.f);
 	helix->SetScale(1.5f, 1.5f, 1.5f);
-	cerberus->SetScale(.05f, .05f, .05f);
+	cerberus->SetScale(.1f, .1f, .1f);
 	cerberus->SetRotation(-1.57f, 0.f, 0.f);
 
-	currentEntity = 0;
+	currentEntity = 2;
 }
 
 void Game::ConvertEquisToEnvironments(int hdrInd)
@@ -281,14 +316,14 @@ void Game::ConvertEquisToEnvironments(int hdrInd)
 	captureTextureDesc.Width = 1024;
 	captureTextureDesc.Height = 1024;
 	captureTextureDesc.ArraySize = 6;
-	captureTextureDesc.MipLevels = 1;
-	captureTextureDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+	captureTextureDesc.MipLevels = 5;
+	captureTextureDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	captureTextureDesc.SampleDesc.Count = 1;
 	captureTextureDesc.SampleDesc.Quality = 0;
 	captureTextureDesc.Usage = D3D11_USAGE_DEFAULT;
 	captureTextureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 	captureTextureDesc.CPUAccessFlags = 0;
-	captureTextureDesc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+	captureTextureDesc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE | D3D11_RESOURCE_MISC_GENERATE_MIPS;
 	device->CreateTexture2D(&captureTextureDesc, 0, &captureTexture);
 
 	/* SRV */
@@ -296,7 +331,7 @@ void Game::ConvertEquisToEnvironments(int hdrInd)
 	srvDesc.Format = captureTextureDesc.Format;
 	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
 	srvDesc.TextureCube.MostDetailedMip = 0;
-	srvDesc.TextureCube.MipLevels = 1;
+	srvDesc.TextureCube.MipLevels = 5;
 
 	/* Set up the render targets */
 	ID3D11RenderTargetView* captureRTVs[6];
@@ -327,13 +362,12 @@ void Game::ConvertEquisToEnvironments(int hdrInd)
 	XMStoreFloat4x4(&captureViews[4], XMMatrixTranspose(XMMatrixLookToLH(XMVectorSet(0, 0, 0, 0), XMVectorSet(-1, 0, 0, 0), XMVectorSet(0, 1, 0, 0))));
 	XMStoreFloat4x4(&captureViews[5], XMMatrixTranspose(XMMatrixLookToLH(XMVectorSet(0, 0, 0, 0), XMVectorSet(1, 0, 0, 0), XMVectorSet(0, 1, 0, 0))));
 
-	GameEntity* ge = entities[0];
 	UINT stride = sizeof(Vertex);
 	UINT offset = 0;
-	Model* model = models[ge->GetModel()];
+	Model* model = models[0];
 	// Grab the data from the mesh
-	ID3D11Buffer* vb = model->meshes[0]->GetVertexBuffer();
-	ID3D11Buffer* ib = model->meshes[0]->GetIndexBuffer();
+	vertexBuffer = model->meshes[0]->GetVertexBuffer();
+	indexBuffer = model->meshes[0]->GetIndexBuffer();
 
 	for (int i = 0; i < 6; i++)
 	{
@@ -344,8 +378,8 @@ void Game::ConvertEquisToEnvironments(int hdrInd)
 		context->RSSetViewports(1, &captureViewport);
 		context->ClearRenderTargetView(captureRTVs[i], color);
 
-		context->IASetVertexBuffers(0, 1, &vb, &stride, &offset); // Set buffers
-		context->IASetIndexBuffer(ib, DXGI_FORMAT_R32_UINT, 0);
+		context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset); // Set buffers
+		context->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
 
 		equirectangularToCubemapVS->SetMatrix4x4("view", captureViews[i]); // Vertex 
 		equirectangularToCubemapVS->SetMatrix4x4("projection", projection);
@@ -366,7 +400,7 @@ void Game::ConvertEquisToEnvironments(int hdrInd)
 	/* Generate mips then transfer to usable cubemap */
 	device->CreateShaderResourceView(captureTexture, &srvDesc, &hdrCubeSRVs[hdrInd]);
 
-	//context->GenerateMips(hdrCubeSRVs[hdrInd]);
+	context->GenerateMips(hdrCubeSRVs[hdrInd]);
 	//ScratchImage hdrScratch;
 	//CaptureTexture(device, context, captureTexture, hdrScratch);
 
@@ -383,49 +417,116 @@ void Game::ConvertEquisToEnvironments(int hdrInd)
 	captureRTVs[4]->Release();
 	captureRTVs[5]->Release();
 
-	/* Compute the environment's irradiance map */
-	captureTextureDesc.Width = 256;
-	captureTextureDesc.Height = 256;
-	captureTextureDesc.MipLevels = 1;
-	captureTextureDesc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
-	device->CreateTexture2D(&captureTextureDesc, 0, &captureTexture);
-	srvDesc.TextureCube.MipLevels = 1;
-	captureViewport.Width = ((FLOAT)captureTextureDesc.Width);
-	captureViewport.Height = ((FLOAT)captureTextureDesc.Height);
+	{/* Compute the environment's irradiance map */
+		captureTextureDesc.Width = 256;
+		captureTextureDesc.Height = 256;
+		captureTextureDesc.MipLevels = 1;
+		captureTextureDesc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+		device->CreateTexture2D(&captureTextureDesc, 0, &captureTexture);
+		srvDesc.TextureCube.MipLevels = 1;
+		captureViewport.Width = ((FLOAT)captureTextureDesc.Width);
+		captureViewport.Height = ((FLOAT)captureTextureDesc.Height);
 
-	for (int i = 0; i < 6; i++)
-	{
-		captureRTVDesc.Texture2DArray.FirstArraySlice = i; // Create a render target to hold each face
-		device->CreateRenderTargetView(captureTexture, &captureRTVDesc, &captureRTVs[i]);
-		context->OMSetRenderTargets(1, &captureRTVs[i], 0);
-		context->RSSetViewports(1, &captureViewport);
-		context->ClearRenderTargetView(captureRTVs[i], color);
+		for (int i = 0; i < 6; i++)
+		{
+			captureRTVDesc.Texture2DArray.FirstArraySlice = i; // Create a render target to hold each face
+			device->CreateRenderTargetView(captureTexture, &captureRTVDesc, &captureRTVs[i]);
+			context->OMSetRenderTargets(1, &captureRTVs[i], 0);
+			context->RSSetViewports(1, &captureViewport);
+			context->ClearRenderTargetView(captureRTVs[i], color);
 
-		context->IASetVertexBuffers(0, 1, &vb, &stride, &offset); // Set buffers
-		context->IASetIndexBuffer(ib, DXGI_FORMAT_R32_UINT, 0);
+			context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset); // Set buffers
+			context->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
 
-		equirectangularToCubemapVS->SetMatrix4x4("view", captureViews[i]); // Vertex 
-		equirectangularToCubemapVS->SetMatrix4x4("projection", projection);
-		equirectangularToCubemapVS->CopyAllBufferData();
-		equirectangularToCubemapVS->SetShader();
+			equirectangularToCubemapVS->SetMatrix4x4("view", captureViews[i]); // Vertex 
+			equirectangularToCubemapVS->SetMatrix4x4("projection", projection);
+			equirectangularToCubemapVS->CopyAllBufferData();
+			equirectangularToCubemapVS->SetShader();
 
-		irradianceConvolutionPS->SetShaderResourceView("EnvironmentCubemap", hdrCubeSRVs[hdrInd]); // Pixel
-		irradianceConvolutionPS->SetSamplerState("BasicSampler", sampler);
-		irradianceConvolutionPS->CopyAllBufferData();
-		irradianceConvolutionPS->SetShader();
+			irradianceConvolutionPS->SetShaderResourceView("EnvironmentCubemap", hdrCubeSRVs[hdrInd]); // Pixel
+			irradianceConvolutionPS->SetSamplerState("BasicSampler", sampler);
+			irradianceConvolutionPS->CopyAllBufferData();
+			irradianceConvolutionPS->SetShader();
 
-		context->RSSetState(skyRasterState);
-		context->OMSetDepthStencilState(skyDepthState, 0);
+			context->RSSetState(skyRasterState);
+			context->OMSetDepthStencilState(skyDepthState, 0);
 
-		context->DrawIndexed(model->meshes[0]->GetIndexCount(), 0, 0);
+			context->DrawIndexed(model->meshes[0]->GetIndexCount(), 0, 0);
+		}
+
+		device->CreateShaderResourceView(captureTexture, &srvDesc, &irradianceMapSRVs[hdrInd]);
+		//CaptureTexture(device, context, captureTexture, hdrScratch);
+
+		//CreateShaderResourceViewEx(device, hdrScratch.GetImages(), hdrScratch.GetImageCount(), hdrScratch.GetMetadata(),
+		//	D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, D3D11_RESOURCE_MISC_TEXTURECUBE,
+		//	false, &irradianceMapSRVs[hdrInd]);
+
+		/* Clean Up */
+		captureTexture->Release();
+		captureRTVs[0]->Release();
+		captureRTVs[1]->Release();
+		captureRTVs[2]->Release();
+		captureRTVs[3]->Release();
+		captureRTVs[4]->Release();
+		captureRTVs[5]->Release(); 
 	}
 
-	device->CreateShaderResourceView(captureTexture, &srvDesc, &irradianceMapSRVs[hdrInd]);
-	//CaptureTexture(device, context, captureTexture, hdrScratch);
+	/* Prefilter for Specular Mips */
+	captureTextureDesc.MipLevels = 5;
+	srvDesc.TextureCube.MipLevels = 5;
+	captureTextureDesc.Width = 512;
+	captureTextureDesc.Height = 512;
+	device->CreateTexture2D(&captureTextureDesc, 0, &captureTexture);
+	XMStoreFloat4x4(&captureViews[4], XMMatrixTranspose(XMMatrixLookToLH(XMVectorSet(0, 0, 0, 0), XMVectorSet(0, 0, 1, 0), XMVectorSet(0, 1, 0, 0))));
+	XMStoreFloat4x4(&captureViews[5], XMMatrixTranspose(XMMatrixLookToLH(XMVectorSet(0, 0, 0, 0), XMVectorSet(0, 0, -1, 0), XMVectorSet(0, 1, 0, 0))));
+	XMStoreFloat4x4(&captureViews[2], XMMatrixTranspose(XMMatrixLookToLH(XMVectorSet(0, 0, 0, 0), XMVectorSet(0, 1, 0, 0), XMVectorSet(0, 0, -1, 0))));
+	XMStoreFloat4x4(&captureViews[3], XMMatrixTranspose(XMMatrixLookToLH(XMVectorSet(0, 0, 0, 0), XMVectorSet(0, -1, 0, 0), XMVectorSet(0, 0, 1, 0))));
+	XMStoreFloat4x4(&captureViews[1], XMMatrixTranspose(XMMatrixLookToLH(XMVectorSet(0, 0, 0, 0), XMVectorSet(-1, 0, 0, 0), XMVectorSet(0, 1, 0, 0))));
+	XMStoreFloat4x4(&captureViews[0], XMMatrixTranspose(XMMatrixLookToLH(XMVectorSet(0, 0, 0, 0), XMVectorSet(1, 0, 0, 0), XMVectorSet(0, 1, 0, 0))));
 
-	//CreateShaderResourceViewEx(device, hdrScratch.GetImages(), hdrScratch.GetImageCount(), hdrScratch.GetMetadata(),
-	//	D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, D3D11_RESOURCE_MISC_TEXTURECUBE,
-	//	false, &irradianceMapSRVs[hdrInd]);
+	for (int m = 0; m < 5; ++m)
+	{
+		captureRTVDesc.Texture2DArray.MipSlice = m;
+
+		captureViewport.Width = ((FLOAT)(captureTextureDesc.Width*powf(.5f, ((float)m))));
+		captureViewport.Height = ((FLOAT)(captureTextureDesc.Height*powf(.5f, ((float)m))));
+		float roughness = (float)m / 4.f;
+		prefilterEnvironmentPS->SetFloat("roughness", roughness);
+
+		for (int i = 0; i < 6; ++i)
+		{
+			captureRTVDesc.Texture2DArray.FirstArraySlice = i; // Create a render target to hold each face
+			device->CreateRenderTargetView(captureTexture, &captureRTVDesc, &captureRTVs[i]);
+			context->OMSetRenderTargets(1, &captureRTVs[i], 0);
+			context->RSSetViewports(1, &captureViewport);
+			context->ClearRenderTargetView(captureRTVs[i], color);
+
+			context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset); // Set buffers
+			context->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
+
+			equirectangularToCubemapVS->SetMatrix4x4("view", captureViews[i]); // Vertex 
+			equirectangularToCubemapVS->SetMatrix4x4("projection", projection);
+			equirectangularToCubemapVS->CopyAllBufferData();
+			equirectangularToCubemapVS->SetShader();
+
+			prefilterEnvironmentPS->SetShaderResourceView("EnvironmentCubemap", hdrCubeSRVs[hdrInd]); // Pixel
+			prefilterEnvironmentPS->SetSamplerState("BasicSampler", sampler);
+			prefilterEnvironmentPS->CopyAllBufferData();
+			prefilterEnvironmentPS->SetShader();
+
+			context->RSSetState(skyRasterState);
+			context->OMSetDepthStencilState(skyDepthState, 0);
+
+			context->DrawIndexed(model->meshes[0]->GetIndexCount(), 0, 0);
+		}
+	}
+
+	device->CreateShaderResourceView(captureTexture, &srvDesc, &envPrefilterSRVs[hdrInd]);
+	////CaptureTexture(device, context, captureTexture, hdrScratch);
+
+	////CreateShaderResourceViewEx(device, hdrScratch.GetImages(), hdrScratch.GetImageCount(), hdrScratch.GetMetadata(),
+	////	D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, D3D11_RESOURCE_MISC_TEXTURECUBE,
+	////	false, &envPrefilterSRVs[hdrInd]);
 
 	/* Clean Up */
 	captureTexture->Release();
@@ -435,68 +536,85 @@ void Game::ConvertEquisToEnvironments(int hdrInd)
 	captureRTVs[3]->Release();
 	captureRTVs[4]->Release();
 	captureRTVs[5]->Release();
-
-	/* Prefilter for Specular Mips */
-	//captureTextureDesc.MipLevels = 5;
-	////captureTextureDesc.Width = 256;
-	////captureTextureDesc.Height = 256;
-	////captureTextureDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
-	////captureTextureDesc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
-	//device->CreateTexture2D(&captureTextureDesc, 0, &captureTexture);
-
-	//for (int m = 0; m < 5; m++)
-	//{
-	//	captureRTVDesc.Texture2DArray.MipSlice = m;
-
-	//	captureViewport.Width = ((FLOAT)(captureTextureDesc.Width*powf(.5f, ((float)m))));
-	//	captureViewport.Height = ((FLOAT)(captureTextureDesc.Height*powf(.5f, ((float)m))));
-	//	float roughness = (float)m / 4.f;
-
-	//	for (int i = 0; i < 6; i++)
-	//	{
-	//		captureRTVDesc.Texture2DArray.FirstArraySlice = i; // Create a render target to hold each face
-	//		device->CreateRenderTargetView(captureTexture, &captureRTVDesc, &captureRTVs[i]);
-	//		context->OMSetRenderTargets(1, &captureRTVs[i], 0);
-	//		context->RSSetViewports(1, &captureViewport);
-	//		context->ClearRenderTargetView(captureRTVs[i], color);
-
-	//		context->IASetVertexBuffers(0, 1, &vb, &stride, &offset); // Set buffers
-	//		context->IASetIndexBuffer(ib, DXGI_FORMAT_R32_UINT, 0);
-
-	//		equirectangularToCubemapVS->SetMatrix4x4("view", captureViews[i]); // Vertex 
-	//		equirectangularToCubemapVS->SetMatrix4x4("projection", projection);
-	//		equirectangularToCubemapVS->CopyAllBufferData();
-	//		equirectangularToCubemapVS->SetShader();
-
-	//		prefilterEnvironmentPS->SetShaderResourceView("EnvironmentCubemap", hdrCubeSRVs[hdrInd]); // Pixel
-	//		prefilterEnvironmentPS->SetSamplerState("BasicSampler", sampler);
-	//		prefilterEnvironmentPS->CopyAllBufferData();
-	//		prefilterEnvironmentPS->SetShader();
-
-	//		context->RSSetState(skyRasterState);
-	//		context->OMSetDepthStencilState(skyDepthState, 0);
-
-	//		context->DrawIndexed(model->meshes[0]->GetIndexCount(), 0, 0);
-	//	}
-	//}
-
-	//device->CreateShaderResourceView(captureTexture, &srvDesc, &envPrefilterSRVs[hdrInd]);
-	////CaptureTexture(device, context, captureTexture, hdrScratch);
-
-	////CreateShaderResourceViewEx(device, hdrScratch.GetImages(), hdrScratch.GetImageCount(), hdrScratch.GetMetadata(),
-	////	D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, D3D11_RESOURCE_MISC_TEXTURECUBE,
-	////	false, &envPrefilterSRVs[hdrInd]);
-
-	///* Clean Up */
-	//captureTexture->Release();
-	//captureRTVs[0]->Release();
-	//captureRTVs[1]->Release();
-	//captureRTVs[2]->Release();
-	//captureRTVs[3]->Release();
-	//captureRTVs[4]->Release();
-	//captureRTVs[5]->Release();
 	context->RSSetState(0);
 	context->OMSetDepthStencilState(0, 0);
+}
+
+void Game::CreateBRDFLUT()
+{
+	/* Capture Texture */
+	ID3D11Texture2D* captureTexture;
+	D3D11_TEXTURE2D_DESC captureDesc = {};
+	captureDesc.Width = 512;
+	captureDesc.Height = 512;
+	captureDesc.MipLevels = captureDesc.CPUAccessFlags = captureDesc.MiscFlags = 0;
+	captureDesc.ArraySize = 1;
+	captureDesc.Format = DXGI_FORMAT_R32G32_FLOAT;
+	captureDesc.Usage = D3D11_USAGE_DEFAULT;
+	captureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+	captureDesc.SampleDesc.Count = 1;
+	captureDesc.SampleDesc.Quality = 0;
+	device->CreateTexture2D(&captureDesc, 0, &captureTexture);
+
+	/* RTV */
+	ID3D11RenderTargetView* captureRTV;
+	D3D11_RENDER_TARGET_VIEW_DESC captureRTVDesc = {};
+	captureRTVDesc.Format = captureDesc.Format;
+	captureRTVDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+	captureRTVDesc.Texture2D.MipSlice = 0;
+	device->CreateRenderTargetView(captureTexture, &captureRTVDesc, &captureRTV);
+	
+	/* SRV */
+	D3D11_SHADER_RESOURCE_VIEW_DESC captureSRVDesc = {};
+	captureSRVDesc.Format = captureRTVDesc.Format;
+	captureSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+	captureSRVDesc.Texture2D.MipLevels = 1;
+	captureSRVDesc.Texture2D.MostDetailedMip = 0;
+
+	/* Viewport */
+	D3D11_VIEWPORT captureViewport;
+	captureViewport.Width = captureDesc.Width;
+	captureViewport.Height = captureDesc.Height;
+	captureViewport.MinDepth = 0.0f;
+	captureViewport.MaxDepth = 1.0f;
+	captureViewport.TopLeftX = 0.0f;
+	captureViewport.TopLeftY = 0.0f;
+	const float color[4] = { 0,1.0f,0,0 };
+	XMFLOAT4X4 projection;
+	XMStoreFloat4x4(&projection, XMMatrixTranspose(XMMatrixPerspectiveFovLH(1.5708f, 1, 0.1f, 10.0f))); // 90 degrees
+	XMFLOAT4X4 captureView;
+	XMStoreFloat4x4(&captureView, XMMatrixTranspose(XMMatrixLookToLH(XMVectorSet(0, 0, -1, 0), XMVectorSet(0, 0, 1, 0), XMVectorSet(0, 1, 0, 0))));
+	XMFLOAT4X4 world;
+	XMStoreFloat4x4(&world, XMMatrixIdentity());
+	context->OMSetRenderTargets(1, &captureRTV, 0);
+	context->RSSetViewports(1, &captureViewport);
+	context->ClearRenderTargetView(captureRTV, color);
+
+	UINT stride = sizeof(Vertex);
+	UINT offset = 0;
+	Model* model = models[1];
+	// Grab the data from the mesh
+	vertexBuffer = model->meshes[0]->GetVertexBuffer();
+	indexBuffer = model->meshes[0]->GetIndexBuffer();
+	context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+	context->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
+
+	vertexShader->SetMatrix4x4("world", world);
+	vertexShader->SetMatrix4x4("view", captureView);
+	vertexShader->SetMatrix4x4("projection", projection);
+
+	vertexShader->CopyAllBufferData();
+	vertexShader->SetShader();
+
+	integrateBRDFPS->SetShader();
+
+
+	context->DrawIndexed(model->meshes[0]->GetIndexCount(), 0, 0);
+
+	device->CreateShaderResourceView(captureTexture, &captureSRVDesc, &brdfLUTSRV);
+
+	captureRTV->Release();
+	captureTexture->Release();
 }
 
 void Game::OnResize()
@@ -524,111 +642,166 @@ void Game::Update(float deltaTime, float totalTime)
 		currentEntity = (currentEntity + 1) % entities.size();
 	prevTab = currentTab;
 
+	bool currentB = (GetAsyncKeyState(0x42) & 0x8000) != 0;
+	if (currentB && !prevB)
+		currentEnv = (currentEnv + 1) % 3;
+	prevB = currentB;
+
 	// Spin current entity
 	//entities[currentEntity]->Rotate(0, deltaTime * 0.2f, 0);
 	
 	// Always update current entity's world matrix
 	entities[currentEntity]->UpdateWorldMatrix();
+	entities[3]->UpdateWorldMatrix();
 }
 
 void Game::Draw(float deltaTime, float totalTime)
 {
+	context->OMSetRenderTargets(1, &backBufferRTV, depthStencilView);
+	context->RSSetViewports(1, &viewport);
 	// Background color (Black in this case) for clearing
-	const float color[4] = { 0,0,0,0 };
+	const float color[4] = { 0,1,1,0 };
 
 	// Clear the render target and depth buffer (erases what's on the screen)
 	//  - Do this ONCE PER FRAME
 	//  - At the beginning of Draw (before drawing *anything*)
-	//context->ClearRenderTargetView(backBufferRTV, color);
-	//context->ClearDepthStencilView(
-	//	depthStencilView,
-	//	D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL,
-	//	1.0f,
-	//	0);
+	context->ClearRenderTargetView(backBufferRTV, color);
+	context->ClearDepthStencilView(
+		depthStencilView,
+		D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL,
+		1.0f,
+		0);
 
 	// Grab the data from the first entity's mesh
 	GameEntity* ge = entities[currentEntity];
 	UINT stride = sizeof(Vertex);
 	UINT offset = 0;
 	Model* model = models[ge->GetModel()];
-	//for (unsigned int i = 0; i < model->meshes.size(); i++)
-	//{
-	//	// Grab the data from the mesh
-	//	ID3D11Buffer* vb = model->meshes[i]->GetVertexBuffer();
-	//	ID3D11Buffer* ib = model->meshes[i]->GetIndexBuffer();
+	for (unsigned int i = 0; i < model->meshes.size(); i++)
+	{
+		// Grab the data from the mesh
+		vertexBuffer = model->meshes[i]->GetVertexBuffer();
+		indexBuffer = model->meshes[i]->GetIndexBuffer();
 
-	//	// Set buffers in the input assembler
-	//	context->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
-	//	context->IASetIndexBuffer(ib, DXGI_FORMAT_R32_UINT, 0);
+		// Set buffers in the input assembler
+		context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+		context->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
 
-	//	vertexShader->SetMatrix4x4("world", *ge->GetWorldMatrix());
-	//	vertexShader->SetMatrix4x4("view", camera->GetView());
-	//	vertexShader->SetMatrix4x4("projection", camera->GetProjection());
+		vertexShader->SetMatrix4x4("world", *ge->GetWorldMatrix());
+		vertexShader->SetMatrix4x4("view", camera->GetView());
+		vertexShader->SetMatrix4x4("projection", camera->GetProjection());
 
-	//	vertexShader->CopyAllBufferData();
-	//	vertexShader->SetShader();
+		vertexShader->CopyAllBufferData();
+		vertexShader->SetShader();
 
-	//	pixelShader->SetFloat3("LightPos1", XMFLOAT3(2, 0, 0));
-	//	pixelShader->SetFloat3("LightPos2", XMFLOAT3(0, 2, 0));
-	//	pixelShader->SetFloat3("LightPos3", XMFLOAT3(0, 0, 2));
-	//	pixelShader->SetFloat3("LightPos4", XMFLOAT3(0, -2, 0));
-	//	pixelShader->SetFloat3("LightColor1", XMFLOAT3(0.95f, 0.95f, 0.95f));
-	//	pixelShader->SetFloat3("CameraPosition", camera->GetPosition());
+		pixelShader->SetFloat3("LightPos1", XMFLOAT3(2, 0, 0));
+		pixelShader->SetFloat3("LightPos2", XMFLOAT3(0, 2, 0));
+		pixelShader->SetFloat3("LightPos3", XMFLOAT3(0, 0, 2));
+		pixelShader->SetFloat3("LightPos4", XMFLOAT3(0, -2, 0));
+		pixelShader->SetFloat3("LightColor1", XMFLOAT3(0.95f, 0.95f, 0.95f));
+		pixelShader->SetFloat3("CameraPosition", camera->GetPosition());
 
-	//	// Send texture-related stuff
-	//	int ind = ge->GetTextures();
-	//	pixelShader->SetShaderResourceView("AlbedoMap", albedoMapSRVs[ind]);
-	//	pixelShader->SetShaderResourceView("NormalMap", normalMapSRVs[ind]);
-	//	pixelShader->SetShaderResourceView("MetallicMap", metalnessMapSRVs[ind]);
-	//	pixelShader->SetShaderResourceView("RoughnessMap", roughnessMapSRVs[ind]);
-	//	pixelShader->SetShaderResourceView("AOMap", aoMapSRVs[0]);
-	//	//pixelShader->SetShaderResourceView("EnvIrradianceMap", irradianceMapSRVs[0]);
-	//	pixelShader->SetSamplerState("BasicSampler", sampler);
+		// Send texture-related stuff
+		int ind = ge->GetTextures();
+		pixelShader->SetShaderResourceView("AlbedoMap", albedoMapSRVs[ind]);
+		pixelShader->SetShaderResourceView("NormalMap", normalMapSRVs[ind]);
+		pixelShader->SetShaderResourceView("MetallicMap", metalnessMapSRVs[ind]);
+		pixelShader->SetShaderResourceView("RoughnessMap", roughnessMapSRVs[ind]);
+		pixelShader->SetShaderResourceView("AOMap", aoMapSRVs[ge->GetAO()]);
+		pixelShader->SetShaderResourceView("BRDFLookup", brdfLUTSRV);
+		pixelShader->SetShaderResourceView("EnvIrradianceMap", irradianceMapSRVs[currentEnv]);
+		pixelShader->SetShaderResourceView("EnvPrefilterMap", envPrefilterSRVs[currentEnv]);
+		pixelShader->SetSamplerState("BasicSampler", sampler);
 
-	//	pixelShader->CopyAllBufferData(); // Remember to copy to the GPU!!!!
-	//	pixelShader->SetShader();
+		pixelShader->CopyAllBufferData(); // Remember to copy to the GPU!!!!
+		pixelShader->SetShader();
 
-	//	// Finally do the actual drawing
-	//	context->DrawIndexed(model->meshes[i]->GetIndexCount(), 0, 0);
-	//}
+		// Finally do the actual drawing
+		context->DrawIndexed(model->meshes[i]->GetIndexCount(), 0, 0);
+	}
+
+	ge = entities[3];
+	model = models[ge->GetModel()];
+	for (unsigned int i = 0; i < model->meshes.size(); i++)
+	{
+		// Grab the data from the mesh
+		vertexBuffer = model->meshes[i]->GetVertexBuffer();
+		indexBuffer = model->meshes[i]->GetIndexBuffer();
+
+		// Set buffers in the input assembler
+		context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+		context->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
+
+		vertexShader->SetMatrix4x4("world", *ge->GetWorldMatrix());
+		vertexShader->SetMatrix4x4("view", camera->GetView());
+		vertexShader->SetMatrix4x4("projection", camera->GetProjection());
+
+		vertexShader->CopyAllBufferData();
+		vertexShader->SetShader();
+
+		pixelShader->SetFloat3("LightPos1", XMFLOAT3(2, 0, 0));
+		pixelShader->SetFloat3("LightPos2", XMFLOAT3(0, 2, 0));
+		pixelShader->SetFloat3("LightPos3", XMFLOAT3(0, 0, 2));
+		pixelShader->SetFloat3("LightPos4", XMFLOAT3(0, -2, 0));
+		pixelShader->SetFloat3("LightColor1", XMFLOAT3(0.95f, 0.95f, 0.95f));
+		pixelShader->SetFloat3("CameraPosition", camera->GetPosition());
+
+		// Send texture-related stuff
+		int ind = ge->GetTextures();
+		pixelShader->SetShaderResourceView("AlbedoMap", albedoMapSRVs[ind]);
+		pixelShader->SetShaderResourceView("NormalMap", normalMapSRVs[ind]);
+		pixelShader->SetShaderResourceView("MetallicMap", metalnessMapSRVs[ind]);
+		pixelShader->SetShaderResourceView("RoughnessMap", roughnessMapSRVs[ind]);
+		pixelShader->SetShaderResourceView("AOMap", aoMapSRVs[ge->GetAO()]);
+		pixelShader->SetShaderResourceView("BRDFLookup", brdfLUTSRV);
+		pixelShader->SetShaderResourceView("EnvIrradianceMap", irradianceMapSRVs[currentEnv]);
+		pixelShader->SetShaderResourceView("EnvPrefilterMap", envPrefilterSRVs[currentEnv]);
+		pixelShader->SetSamplerState("BasicSampler", sampler);
+
+		pixelShader->CopyAllBufferData(); // Remember to copy to the GPU!!!!
+		pixelShader->SetShader();
+
+		// Finally do the actual drawing
+		context->DrawIndexed(model->meshes[i]->GetIndexCount(), 0, 0);
+	}
 
 	// Draw the sky LAST - Ideally, we've set this up so that it
 	// only keeps pixels that haven't been "drawn to" yet (ones that
 	// have a depth of 1.0)
-	//ID3D11Buffer* skyVB = models[0]->meshes[0]->GetVertexBuffer();
-	//ID3D11Buffer* skyIB = models[0]->meshes[0]->GetIndexBuffer();
+	ID3D11Buffer* skyVB = models[0]->meshes[0]->GetVertexBuffer();
+	ID3D11Buffer* skyIB = models[0]->meshes[0]->GetIndexBuffer();
 
-	//// Set the buffers
-	//context->IASetVertexBuffers(0, 1, &skyVB, &stride, &offset);
-	//context->IASetIndexBuffer(skyIB, DXGI_FORMAT_R32_UINT, 0);
+	// Set the buffers
+	context->IASetVertexBuffers(0, 1, &skyVB, &stride, &offset);
+	context->IASetIndexBuffer(skyIB, DXGI_FORMAT_R32_UINT, 0);
 
-	//// Set up the sky shaders
-	//skyVS->SetMatrix4x4("view", camera->GetView());
-	//skyVS->SetMatrix4x4("projection", camera->GetProjection());
-	//skyVS->CopyAllBufferData();
-	//skyVS->SetShader();
+	// Set up the sky shaders
+	skyVS->SetMatrix4x4("view", camera->GetView());
+	skyVS->SetMatrix4x4("projection", camera->GetProjection());
+	skyVS->CopyAllBufferData();
+	skyVS->SetShader();
 
-	////skyPS->SetShaderResourceView("SkyTexture", hdrCubeSRVs[0]);
-	//skyPS->SetSamplerState("BasicSampler", sampler);
-	//skyPS->SetShader();
+	skyPS->SetShaderResourceView("SkyTexture", hdrCubeSRVs[currentEnv]);
+	skyPS->SetSamplerState("BasicSampler", sampler);
+	skyPS->SetShader();
 
-	//// Set up the render state options
-	//context->RSSetState(skyRasterState);
-	//context->OMSetDepthStencilState(skyDepthState, 0);
+	// Set up the render state options
+	context->RSSetState(skyRasterState);
+	context->OMSetDepthStencilState(skyDepthState, 0);
 
-	//// Finally do the actual drawing
-	//context->DrawIndexed(models[0]->meshes[0]->GetIndexCount(), 0, 0);
+	// Finally do the actual drawing
+	context->DrawIndexed(models[0]->meshes[0]->GetIndexCount(), 0, 0);
 
 
 	// Reset any states we've changed for the next frame!
-	//context->RSSetState(0);
-	//context->OMSetDepthStencilState(0, 0);
+	context->RSSetState(0);
+	context->OMSetDepthStencilState(0, 0);
 
 
 	// Present the back buffer to the user
 	//  - Puts the final frame we're drawing into the window so the user can see it
 	//  - Do this exactly ONCE PER FRAME (always at the very end of the frame)
-	//swapChain->Present(0, 0);
+	swapChain->Present(0, 0);
 }
 
 

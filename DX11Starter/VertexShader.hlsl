@@ -43,8 +43,7 @@ VertexToPixel main(VertexShaderInput input)
 	output.worldPos = mul(float4(input.position, 1.0f), world).xyz;
 
 	// Make sure the normal is in WORLD space, not "local" space
-	output.normal = mul(input.normal, (float3x3)world);
-	output.normal = normalize(output.normal); // Make sure it's length is 1
+	output.normal = normalize(mul(input.normal, (float3x3)world));
 
 	// Make sure the tangent is in WORLD space and a unit vector
 	output.tangent = normalize(mul(input.tangent, (float3x3)world));

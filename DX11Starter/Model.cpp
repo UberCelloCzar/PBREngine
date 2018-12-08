@@ -6,9 +6,9 @@ using namespace DirectX;
 
 Model::~Model()
 {
-	for (int i = 0; i < meshes.size(); i++)
+	for (auto& m : meshes)
 	{
-		delete meshes[i];
+		delete m;
 	}
 }
 
