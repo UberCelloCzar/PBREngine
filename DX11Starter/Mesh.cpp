@@ -2,6 +2,7 @@
 #include <DirectXMath.h>
 #include <vector>
 #include <fstream>
+#include <iostream>
 
 using namespace DirectX;
 

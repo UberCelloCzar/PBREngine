@@ -2,6 +2,8 @@
 
 #include <WindowsX.h>
 #include <sstream>
+#include <iostream>
+#include <atlcomcli.h>
 
 // Define the static instance variable so our OS-level 
 // message handling function below can talk to our object
@@ -70,11 +72,21 @@ DXCore::~DXCore()
 {
 	// Release all DirectX resources
 	if (depthStencilView) { depthStencilView->Release(); }
-	if (backBufferRTV) { backBufferRTV->Release();}
+	if (backBufferRTV) { backBufferRTV->Release(); }
+	if (occlusionRTV) { occlusionRTV->Release(); }
+	if (occlusionSRV) { occlusionSRV->Release(); }
 
-	if (swapChain) { swapChain->Release();}
-	if (context) { context->Release();}
-	if (device) { device->Release();}
+	if (swapChain) { swapChain->Release(); }
+	if (context) { context->Release(); }
+	CComPtr<ID3D11Debug> pDebug;
+	HRESULT hr = device->QueryInterface(IID_PPV_ARGS(&pDebug));
+	if (device) { device->Release(); }
+
+	if (pDebug != nullptr)
+	{
+		pDebug->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL);
+		pDebug = nullptr;
+	}
 }
 
 // --------------------------------------------------------
@@ -264,6 +276,37 @@ HRESULT DXCore::InitDirectX()
 	viewport.MaxDepth	= 1.0f;
 	context->RSSetViewports(1, &viewport);
 
+	/* Stuff for crepsecular post process */
+	/* Capture Texture */
+	ID3D11Texture2D* captureTexture;
+	D3D11_TEXTURE2D_DESC captureDesc = {};
+	captureDesc.Width = width;
+	captureDesc.Height = height;
+	captureDesc.MipLevels = captureDesc.CPUAccessFlags = captureDesc.MiscFlags = 0;
+	captureDesc.ArraySize = 1;
+	captureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	captureDesc.Usage = D3D11_USAGE_DEFAULT;
+	captureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+	captureDesc.SampleDesc.Count = 1;
+	captureDesc.SampleDesc.Quality = 0;
+	device->CreateTexture2D(&captureDesc, 0, &captureTexture);
+
+	/* RTV */
+	D3D11_RENDER_TARGET_VIEW_DESC captureRTVDesc = {};
+	captureRTVDesc.Format = captureDesc.Format;
+	captureRTVDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+	captureRTVDesc.Texture2D.MipSlice = 0;
+	device->CreateRenderTargetView(captureTexture, &captureRTVDesc, &occlusionRTV);
+
+	/* SRV */
+	D3D11_SHADER_RESOURCE_VIEW_DESC captureSRVDesc = {};
+	captureSRVDesc.Format = captureRTVDesc.Format;
+	captureSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+	captureSRVDesc.Texture2D.MipLevels = 1;
+	captureSRVDesc.Texture2D.MostDetailedMip = 0;
+	device->CreateShaderResourceView(captureTexture, &captureSRVDesc, &occlusionSRV);
+	captureTexture->Release();
+
 	// Return the "everything is ok" HRESULT value
 	return S_OK;
 }
@@ -332,6 +375,36 @@ void DXCore::OnResize()
 	viewport.MinDepth = 0.0f;
 	viewport.MaxDepth = 1.0f;
 	context->RSSetViewports(1, &viewport);
+
+	/* Stuff for crepsecular post process */
+	/* Capture Texture */
+	ID3D11Texture2D* captureTexture;
+	D3D11_TEXTURE2D_DESC captureDesc = {};
+	captureDesc.Width = width;
+	captureDesc.Height = height;
+	captureDesc.MipLevels = captureDesc.CPUAccessFlags = captureDesc.MiscFlags = 0;
+	captureDesc.ArraySize = 1;
+	captureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	captureDesc.Usage = D3D11_USAGE_DEFAULT;
+	captureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+	captureDesc.SampleDesc.Count = 1;
+	captureDesc.SampleDesc.Quality = 0;
+	device->CreateTexture2D(&captureDesc, 0, &captureTexture);
+
+	/* RTV */
+	D3D11_RENDER_TARGET_VIEW_DESC captureRTVDesc = {};
+	captureRTVDesc.Format = captureDesc.Format;
+	captureRTVDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+	captureRTVDesc.Texture2D.MipSlice = 0;
+	device->CreateRenderTargetView(captureTexture, &captureRTVDesc, &occlusionRTV);
+
+	D3D11_SHADER_RESOURCE_VIEW_DESC captureSRVDesc = {};
+	captureSRVDesc.Format = captureRTVDesc.Format;
+	captureSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+	captureSRVDesc.Texture2D.MipLevels = 1;
+	captureSRVDesc.Texture2D.MostDetailedMip = 0;
+	device->CreateShaderResourceView(captureTexture, &captureSRVDesc, &occlusionSRV);
+	captureTexture->Release();
 }
 
 

@@ -23,6 +23,7 @@ public:
 	int GetTextures() { return textureIndex; }
 	int GetAO() { return aoIndex; }
 	DirectX::XMFLOAT4X4* GetWorldMatrix() { return &worldMatrix; }
+	DirectX::XMFLOAT3 GetPosition() { return position; }
 private:
 
 	int textureIndex;

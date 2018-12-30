@@ -23,6 +23,9 @@ public:
 	void OnResize();
 	void Update(float deltaTime, float totalTime);
 	void Draw(float deltaTime, float totalTime);
+	void RenderGeometry();
+	void RenderSkybox();
+	void RenderSun();
 
 	// Overridden mouse input helper methods
 	void OnMouseDown (WPARAM buttonState, int x, int y);
@@ -90,6 +93,15 @@ private:
 	ID3D11ShaderResourceView* envPrefilterSRVs[3];
 	ID3D11ShaderResourceView* brdfLUTSRV;
 
+	/* Stuff for crepsecular rays */
+	SimpleVertexShader* sunVS;
+	SimplePixelShader* sunPS;
+	SimpleVertexShader* fillscreenVS;
+	SimplePixelShader* crepsecularPS;
+	ID3D11DepthStencilState* sunDepthState;
+	ID3D11BlendState* sunBlendState;
+	DirectX::XMFLOAT2 CalculateSunScreenPos();
+	ID3D11ShaderResourceView* emptySRVs[16] = {};
 
 	// Needed for sampling options (like filter and address modes)
 	ID3D11SamplerState* sampler;
@@ -98,4 +110,3 @@ private:
 	// determining how far the mouse moved in a single frame.
 	POINT prevMousePos;
 };
-

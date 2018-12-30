@@ -21,8 +21,8 @@ Game::Game(HINSTANCE hInstance)
 	: DXCore(
 		hInstance,		   // The application's handle
 		"DirectX Game",	   // Text for the window's title bar
-		1920,			   // Width of the window's client area
-		1080,			   // Height of the window's client area
+		1280,			   // Width of the window's client area
+		720,			   // Height of the window's client area
 		true)			   // Show extra stats (fps) in title bar?
 {
 	// Initialize fields
@@ -84,11 +84,24 @@ Game::~Game()
 	delete prefilterEnvironmentPS;
 	delete integrateBRDFPS;
 
+
+	delete sunPS;
+	delete sunVS;
+	delete fillscreenVS;
+	delete crepsecularPS;
+	sunDepthState->Release();
+	sunBlendState->Release();
+
 	// Clean up our other resources
-	for (auto& m : models) { delete m; }
-	for (auto& e : entities) { delete e; }
+	for (auto& m : models) 
+	{ 
+		delete m; 
+	}
+	for (auto& e : entities) 
+	{ 
+		delete e; 
+	}
 	delete camera;
-	
 }
 
 void Game::Init()
@@ -127,9 +140,24 @@ void Game::Init()
 	ds.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
 	device->CreateDepthStencilState(&ds, &skyDepthState);
 
-	// Tell the input assembler stage of the pipeline what kind of
-	// geometric primitives (points, lines or triangles) we want to draw.  
-	// Essentially: "What kind of shape should the GPU draw with our data?"
+	ds.DepthEnable = false;
+	ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+	ds.DepthFunc = D3D11_COMPARISON_NEVER;
+	ds.StencilEnable = false;
+	device->CreateDepthStencilState(&ds, &sunDepthState);
+
+	D3D11_BLEND_DESC bsd = {};
+	bsd.RenderTarget[0].BlendEnable = TRUE;
+	bsd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+	bsd.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+	bsd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+	bsd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+	bsd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+	bsd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+	bsd.RenderTarget[0].RenderTargetWriteMask = 0x0f;
+
+	device->CreateBlendState(&bsd, &sunBlendState);
+
 	context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	// Convert equirectangular maps to all the necessary parts for a PBR environment 
@@ -175,6 +203,18 @@ void Game::LoadShaders()
 
 	skyPS = new SimplePixelShader(device, context);
 	skyPS->LoadShaderFile(L"SkyPS.cso");
+
+	sunVS = new SimpleVertexShader(device, context);
+	sunVS->LoadShaderFile(L"sunVS.cso");
+
+	sunPS = new SimplePixelShader(device, context);
+	sunPS->LoadShaderFile(L"sunPS.cso");
+
+	fillscreenVS = new SimpleVertexShader(device, context);
+	fillscreenVS->LoadShaderFile(L"fillscreenVS.cso");
+
+	crepsecularPS = new SimplePixelShader(device, context);
+	crepsecularPS->LoadShaderFile(L"crepsecularPS.cso");
 }
 
 void Game::CreateMatrices()
@@ -287,12 +327,14 @@ void Game::LoadTextures()
 void Game::CreateGameEntities()
 {
 	// Make some entities
-	GameEntity* cube = new GameEntity(0, 9, 0);
+	GameEntity* cube = new GameEntity(0, 1, 0);
 	GameEntity* quad = new GameEntity(1, 0, 0);
 	GameEntity* sphere = new GameEntity(2, 1, 0);
+	GameEntity* sunSphere = new GameEntity(2, 1, 0);
 	GameEntity* helix = new GameEntity(3, 3, 0);
 	GameEntity* cerberus = new GameEntity(7, 10, 1);
 	entities.push_back(cube);
+	entities.push_back(sunSphere);
 	entities.push_back(quad);
 	entities.push_back(cerberus);
 	entities.push_back(sphere);
@@ -301,11 +343,14 @@ void Game::CreateGameEntities()
 
 	sphere->SetScale(1.5f, 1.5f, 1.5f);
 	sphere->SetPosition(0.f, 1.5f, -16.f);
+	sunSphere->SetPosition(-.98, 0.8, .2);
+	sunSphere->SetScale(.2f, .2f, .2f);
+	sunSphere->UpdateWorldMatrix();
 	helix->SetScale(1.5f, 1.5f, 1.5f);
 	cerberus->SetScale(.1f, .1f, .1f);
 	cerberus->SetRotation(-1.57f, 0.f, 0.f);
 
-	currentEntity = 2;
+	currentEntity = 3;
 }
 
 void Game::ConvertEquisToEnvironments(int hdrInd)
@@ -468,7 +513,7 @@ void Game::ConvertEquisToEnvironments(int hdrInd)
 		captureRTVs[2]->Release();
 		captureRTVs[3]->Release();
 		captureRTVs[4]->Release();
-		captureRTVs[5]->Release(); 
+		captureRTVs[5]->Release();
 	}
 
 	/* Prefilter for Specular Mips */
@@ -519,6 +564,12 @@ void Game::ConvertEquisToEnvironments(int hdrInd)
 
 			context->DrawIndexed(model->meshes[0]->GetIndexCount(), 0, 0);
 		}
+		captureRTVs[0]->Release();
+		captureRTVs[1]->Release();
+		captureRTVs[2]->Release();
+		captureRTVs[3]->Release();
+		captureRTVs[4]->Release();
+		captureRTVs[5]->Release();
 	}
 
 	device->CreateShaderResourceView(captureTexture, &srvDesc, &envPrefilterSRVs[hdrInd]);
@@ -530,12 +581,6 @@ void Game::ConvertEquisToEnvironments(int hdrInd)
 
 	/* Clean Up */
 	captureTexture->Release();
-	captureRTVs[0]->Release();
-	captureRTVs[1]->Release();
-	captureRTVs[2]->Release();
-	captureRTVs[3]->Release();
-	captureRTVs[4]->Release();
-	captureRTVs[5]->Release();
 	context->RSSetState(0);
 	context->OMSetDepthStencilState(0, 0);
 }
@@ -653,29 +698,97 @@ void Game::Update(float deltaTime, float totalTime)
 	// Always update current entity's world matrix
 	entities[currentEntity]->UpdateWorldMatrix();
 	entities[3]->UpdateWorldMatrix();
+
 }
 
 void Game::Draw(float deltaTime, float totalTime)
 {
-	context->OMSetRenderTargets(1, &backBufferRTV, depthStencilView);
 	context->RSSetViewports(1, &viewport);
-	// Background color (Black in this case) for clearing
-	const float color[4] = { 0,1,1,0 };
+	const float color[4] = { 0,0,0,1 };
 
-	// Clear the render target and depth buffer (erases what's on the screen)
-	//  - Do this ONCE PER FRAME
-	//  - At the beginning of Draw (before drawing *anything*)
-	context->ClearRenderTargetView(backBufferRTV, color);
-	context->ClearDepthStencilView(
-		depthStencilView,
-		D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL,
-		1.0f,
-		0);
+	/* Draw the occlusion pass */
+	context->OMSetRenderTargets(1, &occlusionRTV, depthStencilView);
+	context->ClearRenderTargetView(occlusionRTV, color);
+	context->ClearDepthStencilView(depthStencilView, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 
-	// Grab the data from the first entity's mesh
-	GameEntity* ge = entities[currentEntity];
 	UINT stride = sizeof(Vertex);
 	UINT offset = 0;
+
+	GameEntity* ge = entities[currentEntity];
+	Model* model = models[ge->GetModel()];
+	for (unsigned int i = 0; i < model->meshes.size(); i++)
+	{
+		// Grab the data from the mesh
+		vertexBuffer = model->meshes[i]->GetVertexBuffer();
+		indexBuffer = model->meshes[i]->GetIndexBuffer();
+
+		// Set buffers in the input assembler
+		context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+		context->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
+
+		vertexShader->SetMatrix4x4("world", *ge->GetWorldMatrix());
+		vertexShader->SetMatrix4x4("view", camera->GetView());
+		vertexShader->SetMatrix4x4("projection", camera->GetProjection());
+
+		vertexShader->CopyAllBufferData();
+		vertexShader->SetShader();
+
+		sunPS->SetFloat3("color", XMFLOAT3(0, 0, 0));
+		sunPS->CopyAllBufferData();
+		sunPS->SetShader();
+
+		// Finally do the actual drawing
+		context->DrawIndexed(model->meshes[i]->GetIndexCount(), 0, 0);
+	}
+
+	RenderSun();
+
+	/* Draw the main render pass */
+	context->OMSetRenderTargets(1, &backBufferRTV, depthStencilView);
+	context->ClearRenderTargetView(backBufferRTV, color);
+	context->ClearDepthStencilView(depthStencilView, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+	RenderGeometry();
+	RenderSkybox();
+	RenderSun();
+
+	/* Draw the post process crepsecular rays as an additive layer with the occlusion render to cover the source */
+	float blendFactor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	context->OMSetBlendState(sunBlendState, blendFactor, 0xffffffff);
+	fillscreenVS->SetShader();
+
+	crepsecularPS->SetFloat2("screenSpaceLightPos", CalculateSunScreenPos());
+	crepsecularPS->SetFloat("density", 1.0f);
+	crepsecularPS->SetFloat("weight", 0.01f);
+	crepsecularPS->SetFloat("decay", 1.0f);
+	crepsecularPS->SetFloat("exposure", 1.0f);
+	crepsecularPS->SetInt("numSamples", 100);
+	crepsecularPS->CopyAllBufferData();
+
+	crepsecularPS->SetShaderResourceView("OcclusionTexture", occlusionSRV);
+	crepsecularPS->SetSamplerState("Sampler", sampler);
+	crepsecularPS->SetShader();
+
+
+	ID3D11Buffer* blank = 0;
+	context->IASetVertexBuffers(0, 1, &blank, &stride, &offset);
+	context->IASetIndexBuffer(0, DXGI_FORMAT_R32_UINT, 0);
+
+	context->Draw(3, 0); // Draw one heckin big triangle
+	context->OMSetBlendState(0, blendFactor, 0xffffffff);
+
+
+	swapChain->Present(0, 0);
+
+	context->PSSetShaderResources(0, 16, emptySRVs); // Clear up objects for reuse
+}
+
+void Game::RenderGeometry()
+{
+	// Grab the data from the first entity's mesh
+	UINT stride = sizeof(Vertex);
+	UINT offset = 0;
+
+	GameEntity* ge = entities[currentEntity];
 	Model* model = models[ge->GetModel()];
 	for (unsigned int i = 0; i < model->meshes.size(); i++)
 	{
@@ -719,51 +832,13 @@ void Game::Draw(float deltaTime, float totalTime)
 		// Finally do the actual drawing
 		context->DrawIndexed(model->meshes[i]->GetIndexCount(), 0, 0);
 	}
+}
 
-	ge = entities[3];
-	model = models[ge->GetModel()];
-	for (unsigned int i = 0; i < model->meshes.size(); i++)
-	{
-		// Grab the data from the mesh
-		vertexBuffer = model->meshes[i]->GetVertexBuffer();
-		indexBuffer = model->meshes[i]->GetIndexBuffer();
-
-		// Set buffers in the input assembler
-		context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
-		context->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
-
-		vertexShader->SetMatrix4x4("world", *ge->GetWorldMatrix());
-		vertexShader->SetMatrix4x4("view", camera->GetView());
-		vertexShader->SetMatrix4x4("projection", camera->GetProjection());
-
-		vertexShader->CopyAllBufferData();
-		vertexShader->SetShader();
-
-		pixelShader->SetFloat3("LightPos1", XMFLOAT3(2, 0, 0));
-		pixelShader->SetFloat3("LightPos2", XMFLOAT3(0, 2, 0));
-		pixelShader->SetFloat3("LightPos3", XMFLOAT3(0, 0, 2));
-		pixelShader->SetFloat3("LightPos4", XMFLOAT3(0, -2, 0));
-		pixelShader->SetFloat3("LightColor1", XMFLOAT3(0.95f, 0.95f, 0.95f));
-		pixelShader->SetFloat3("CameraPosition", camera->GetPosition());
-
-		// Send texture-related stuff
-		int ind = ge->GetTextures();
-		pixelShader->SetShaderResourceView("AlbedoMap", albedoMapSRVs[ind]);
-		pixelShader->SetShaderResourceView("NormalMap", normalMapSRVs[ind]);
-		pixelShader->SetShaderResourceView("MetallicMap", metalnessMapSRVs[ind]);
-		pixelShader->SetShaderResourceView("RoughnessMap", roughnessMapSRVs[ind]);
-		pixelShader->SetShaderResourceView("AOMap", aoMapSRVs[ge->GetAO()]);
-		pixelShader->SetShaderResourceView("BRDFLookup", brdfLUTSRV);
-		pixelShader->SetShaderResourceView("EnvIrradianceMap", irradianceMapSRVs[currentEnv]);
-		pixelShader->SetShaderResourceView("EnvPrefilterMap", envPrefilterSRVs[currentEnv]);
-		pixelShader->SetSamplerState("BasicSampler", sampler);
-
-		pixelShader->CopyAllBufferData(); // Remember to copy to the GPU!!!!
-		pixelShader->SetShader();
-
-		// Finally do the actual drawing
-		context->DrawIndexed(model->meshes[i]->GetIndexCount(), 0, 0);
-	}
+void Game::RenderSkybox()
+{
+	// Grab the data from the first entity's mesh
+	UINT stride = sizeof(Vertex);
+	UINT offset = 0;
 
 	// Draw the sky LAST - Ideally, we've set this up so that it
 	// only keeps pixels that haven't been "drawn to" yet (ones that
@@ -796,14 +871,60 @@ void Game::Draw(float deltaTime, float totalTime)
 	// Reset any states we've changed for the next frame!
 	context->RSSetState(0);
 	context->OMSetDepthStencilState(0, 0);
-
-
-	// Present the back buffer to the user
-	//  - Puts the final frame we're drawing into the window so the user can see it
-	//  - Do this exactly ONCE PER FRAME (always at the very end of the frame)
-	swapChain->Present(0, 0);
 }
 
+void Game::RenderSun()
+{	// Grab the data from the first entity's mesh
+	UINT stride = sizeof(Vertex);
+	UINT offset = 0;
+
+	context->OMSetDepthStencilState(skyDepthState, 0);
+	GameEntity* ge = entities[1];
+	Model* model = models[ge->GetModel()];
+	vertexBuffer = model->meshes[0]->GetVertexBuffer();
+	indexBuffer = model->meshes[0]->GetIndexBuffer();
+
+	context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+	context->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
+	sunVS->SetMatrix4x4("world", *ge->GetWorldMatrix());
+	sunVS->SetMatrix4x4("view", camera->GetView());
+	sunVS->SetMatrix4x4("projection", camera->GetProjection());
+
+	sunVS->CopyAllBufferData();
+	sunVS->SetShader();
+
+	sunPS->SetFloat3("color", XMFLOAT3(1, 1, 1));
+	sunPS->CopyAllBufferData();
+	sunPS->SetShader();
+
+	context->DrawIndexed(model->meshes[0]->GetIndexCount(), 0, 0);
+	context->OMSetDepthStencilState(0, 0);
+}
+
+XMFLOAT2 Game::CalculateSunScreenPos() // Calculate the screen space position of the sun object
+{
+	XMVECTOR v = XMLoadFloat3(&entities[1]->GetPosition());
+	//v = XMVectorSetW(v, 1.0f);
+	XMFLOAT4X4 viewNoMovement = camera->GetView();
+	viewNoMovement._41 = 0;
+	viewNoMovement._42 = 0;
+	viewNoMovement._43 = 0;
+	XMMATRIX vnm = XMLoadFloat4x4(&viewNoMovement);
+	XMMATRIX world = XMLoadFloat4x4(entities[1]->GetWorldMatrix());
+	XMMATRIX proj = XMLoadFloat4x4(&camera->GetProjection());
+	proj = XMMatrixTranspose(XMMatrixMultiply(XMMatrixMultiply(proj, vnm), world)); // Doubling up proj to be worldviewproj here to save stack time
+	v = XMVector4Transform(v, proj);
+	v = XMVectorScale(v, 1.0 / XMVectorGetW(v)); // Perspective division
+	XMVECTOR a = XMVectorSet(1.0f, 1.0f, 0.0f, 0.0f);
+	v = XMVectorAdd(v, a); // Map from range [-1,+1] to range [0,+1]
+	v = XMVectorScale(v, 0.5f);
+
+	XMFLOAT2 ssLP;
+	XMStoreFloat2(&ssLP, v);
+	ssLP.y = 1.0f - ssLP.y;
+	//std::cout << ssLP.x << ", " << ssLP.y << std::endl;
+	return ssLP;
+}
 
 #pragma region Mouse Input
 

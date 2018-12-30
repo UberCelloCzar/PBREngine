@@ -68,6 +68,8 @@ protected:
 
 	ID3D11RenderTargetView* backBufferRTV;
 	ID3D11DepthStencilView* depthStencilView;
+	ID3D11RenderTargetView* occlusionRTV;
+	ID3D11ShaderResourceView* occlusionSRV;
 	D3D11_VIEWPORT viewport;
 
 	// Helper function for allocating a console window
