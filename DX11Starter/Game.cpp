@@ -21,8 +21,8 @@ Game::Game(HINSTANCE hInstance)
 	: DXCore(
 		hInstance,		   // The application's handle
 		"DirectX Game",	   // Text for the window's title bar
-		1280,			   // Width of the window's client area
-		720,			   // Height of the window's client area
+		1920,			   // Width of the window's client area
+		1080,			   // Height of the window's client area
 		true)			   // Show extra stats (fps) in title bar?
 {
 	// Initialize fields

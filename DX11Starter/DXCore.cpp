@@ -324,6 +324,8 @@ void DXCore::OnResize()
 	// Release existing DirectX views and buffers
 	if (depthStencilView) { depthStencilView->Release(); }
 	if (backBufferRTV) { backBufferRTV->Release(); }
+	if (occlusionRTV) { occlusionRTV->Release(); }
+	if (occlusionSRV) { occlusionSRV->Release(); }
 
 	// Resize the underlying swap chain buffers
 	swapChain->ResizeBuffers(
